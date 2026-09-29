@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
+from lfx.application_observability import db_phase, observe_db_phase
 from lfx.graph.exceptions import GraphPausedException
 from lfx.observability import inject_trace_carrier
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -115,6 +116,7 @@ class JobService(Service):
             result = await session.exec(stmt)
             return result.first()
 
+    @observe_db_phase("job.create")
     async def create_job(
         self,
         job_id: UUID,
@@ -227,9 +229,12 @@ class JobService(Service):
         Returns:
             Updated Job object or None if not found
         """
-        async with session_scope() as session:
-            finished_at = datetime.now(timezone.utc) if finished_timestamp else None
-            return await update_job_status(session, job_id, status, finished_timestamp=finished_at)
+        # Only terminal writes set finished_timestamp, and they are the only status writes that
+        # follow a run, so the phase alone tells DB span metrics which side of the flow it was on.
+        with db_phase("job.finish" if finished_timestamp else "job.status"):
+            async with session_scope() as session:
+                finished_at = datetime.now(timezone.utc) if finished_timestamp else None
+                return await update_job_status(session, job_id, status, finished_timestamp=finished_at)
 
     async def update_job_metadata(
         self,
